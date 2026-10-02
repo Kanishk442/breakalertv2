@@ -1,0 +1,77 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BrakeAlert V2V</title><style>
+body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:12px;max-width:520px;margin:auto}
+h1{font-size:20px;margin:4px 0}.card{background:#1e293b;border-radius:12px;padding:12px;margin:10px 0}
+button,select{padding:10px;border-radius:8px;border:0;background:#334155;color:#fff;margin:3px;font-size:14px}
+button.p{background:#2563eb}button.r{background:#dc2626}label{display:block;font-size:13px;margin-top:6px}input[type=range]{width:100%}
+.bar{height:14px;background:#334155;border-radius:7px;margin:4px 0;overflow:hidden}.bar i{display:block;height:100%;background:#22c55e;width:0}
+#ov{display:none;position:fixed;inset:0;background:#b91c1c;z-index:9;text-align:center;padding-top:25vh;font-size:22px}
+#log{font:12px monospace;max-height:140px;overflow:auto}small{color:#94a3b8}</style></head><body>
+<div id="ov" onclick="this.style.display='none'"><div style="font-size:42px">⚠ BRAKING AHEAD</div><div id="ovt"></div><small>tap to dismiss</small></div>
+<h1>🚗 BrakeAlert – V2V Emergency Brake Warning</h1><small id="mi">loading model…</small>
+<div class="card">
+ <select id="role"><option value="lead">Car A (lead)</option><option value="follow">Car B (follower)</option></select>
+ <select id="mode"><option value="sim">Simulator</option><option value="sensor">Real sensors</option></select>
+ <button class="p" onclick="start()">Start</button>
+ <label>Speed: <b id="sv">50</b> km/h</label><input id="sp" type="range" min="0" max="120" value="50" oninput="sv.textContent=this.value;sync()">
+ <label>Gap behind Car A (follower, m): <b id="gv">60</b></label><input id="gap" type="range" min="10" max="400" value="60" oninput="gv.textContent=this.value;sync()">
+ <label>Sensor sensitivity ×<b id="kv">1</b> (use 3–5 for hand demo)</label><input id="k" type="range" min="1" max="6" step=".5" value="1" oninput="kv.textContent=this.value">
+</div>
+<div class="card"><b>Inject driving scenario (simulator)</b><br>
+ <button onclick="run('normal')">Normal drive</button><button onclick="run('bump')">Speed bump</button>
+ <button onclick="run('shake')">Phone shake</button><button class="r" onclick="run('brake')">EMERGENCY BRAKE</button></div>
+<div class="card"><b>ML classifier output</b> <span id="acc"></span><div id="bars"></div></div>
+<div class="card"><canvas id="cv" width="300" height="300" style="width:100%;background:#0b1220;border-radius:8px"></canvas><small>Radar: you = blue (up = heading). Red = braking vehicle.</small></div>
+<div class="card"><b>Event log</b><div id="log"></div></div>
+<script src="/socket.io/socket.io.js"></script><script>
+const $=id=>document.getElementById(id),rn=(s=1)=>(Math.random()+Math.random()+Math.random()-1.5)*1.4*s;
+let M,sock,me={lat:22.7196,lon:75.8577,speed:50,heading:0},peers=[],buf=[],last=0,live=false,g=[0,0,9.8];
+const name='Car-'+Math.random().toString(36).slice(2,5);
+fetch('model.json').then(r=>r.json()).then(m=>{M=m;$('mi').textContent=`MLP ${m.arch} · trained in Python (scikit-learn) · test acc ${(m.acc*100).toFixed(1)}%`;
+ $('bars').innerHTML=m.classes.map((c,i)=>`${c}<div class=bar><i id=b${i}></i></div>`).join('')});
+const L=t=>{$('log').innerHTML=`${new Date().toLocaleTimeString()} ${t}<br>`+$('log').innerHTML};
+function sync(){if($('mode').value==='sim'){me.speed=+$('sp').value;me.heading=0;me.lat=22.7196-($('role').value==='lead'?0:+$('gap').value/111320);me.lon=75.8577}}
+function start(){sync();sock=io();sock.on('alert',onAlert);sock.on('peers',p=>{peers=p;draw()});
+ setInterval(()=>{sync();sock.emit('telemetry',{...me,name,role:$('role').value})},1000);
+ if($('mode').value==='sensor'){
+  const go=()=>{addEventListener('devicemotion',onMotion);navigator.geolocation.watchPosition(p=>{me.lat=p.coords.latitude;me.lon=p.coords.longitude;me.speed=(p.coords.speed||0)*3.6;me.heading=p.coords.heading||0},()=>L('GPS denied'),{enableHighAccuracy:true});setInterval(()=>buf.length>=50&&evalWin(buf.slice(-50)),100)};
+  if(window.DeviceMotionEvent&&DeviceMotionEvent.requestPermission)DeviceMotionEvent.requestPermission().then(r=>r==='granted'&&go());else go()}
+ try{new AudioContext().resume()}catch(e){} L('connected as '+name)}
+function onMotion(e){const a=e.accelerationIncludingGravity;if(!a)return;const k=+$('k').value;
+ g=g.map((v,i)=>.9*v+.1*[a.x,a.y,a.z][i]);const n=Math.hypot(...g),u=g.map(v=>v/n);
+ const lin=[a.x-g[0],a.y-g[1],a.z-g[2]],v=lin.reduce((s,x,i)=>s+x*u[i],0),h=lin.map((x,i)=>(x-v*u[i])*k);
+ buf.push({h,v:v*k});if(buf.length>200)buf.shift()}
+function feats(w){const hm=w.map(s=>Math.hypot(...s.h)),n=w.length,mean=a=>a.reduce((x,y)=>x+y,0)/a.length,mh=mean(hm),mv=mean(w.map(s=>s.v));
+ const mvec=w[0].h.map((_,i)=>mean(w.map(s=>s.h[i])));let jk=0;for(let i=1;i<n;i++)jk=Math.max(jk,Math.abs(hm[i]-hm[i-1])/.02/100);
+ return[Math.max(...hm),mh,hm.filter(x=>x>3).length/n,Math.max(...w.map(s=>Math.abs(s.v))),Math.sqrt(mean(w.map(s=>(s.v-mv)**2))),Math.hypot(...mvec)/(mh+1e-6),jk]}
+function predict(f){let x=f.map((v,i)=>(v-M.mean[i])/M.scale[i]);
+ M.W.forEach((W,l)=>{const y=M.b[l].map((b,j)=>b+x.reduce((s,xi,i)=>s+xi*W[i][j],0));x=l<M.W.length-1?y.map(v=>Math.max(0,v)):y});
+ const m=Math.max(...x),e=x.map(v=>Math.exp(v-m)),s=e.reduce((a,b)=>a+b);return e.map(v=>v/s)}
+function evalWin(w){if(!M)return;const f=feats(w),p=predict(f);p.forEach((v,i)=>$('b'+i).style.width=v*100+'%');
+ $('acc').textContent=`peak ${f[0].toFixed(1)} m/s²`;const now=Date.now();
+ if(p[2]>.8&&now-last>5000&&sock){last=now;sock.emit('brake',{...me,name,decel:f[0],prob:p[2],ts:now});L(`🔴 EMERGENCY BRAKE detected (p=${p[2].toFixed(2)}, ${f[0].toFixed(1)} m/s²) → broadcast`)}
+ else if(f[0]>3)L(`classified: ${M.classes[p.indexOf(Math.max(...p))]} (no alert)`)}
+function gen(c){const th=Math.random()*6.28,s=5+Math.random()*25|0,d=15+Math.random()*30|0,a=4+Math.random()*5,w=[];
+ for(let i=0;i<50;i++){let h=[rn(.3),rn(.3)],v=rn(.4);
+  if(c==='normal')h[0]+=2*Math.sin(i/12);
+  if(c==='bump'&&i>=s&&i<s+8)v+=(5+Math.random()*10)*Math.exp(-(i-s)/3)*Math.cos((i-s)*1.2);
+  if(c==='brake'&&i>=s&&i<s+d)h[0]+=a*Math.min(1,(i-s)/4);
+  if(c==='shake'){h=[rn(5),rn(5)];v=rn(5)}
+  w.push({h:[h[0]*Math.cos(th)-h[1]*Math.sin(th),h[0]*Math.sin(th)+h[1]*Math.cos(th)],v})}return w}
+function run(c){if(!sock)start();sync();evalWin(gen(c))}
+const brg=(a,b)=>{const r=Math.PI/180,dl=(b.lon-a.lon)*r,y=Math.sin(dl)*Math.cos(b.lat*r),x=Math.cos(a.lat*r)*Math.sin(b.lat*r)-Math.sin(a.lat*r)*Math.cos(b.lat*r)*Math.cos(dl);return(Math.atan2(y,x)/r+360)%360},
+ ad=(a,b)=>Math.abs(((a-b+540)%360)-180);
+function onAlert(e){const ahead=ad(brg(me,e),me.heading)<45,same=ad(e.heading,me.heading)<45;
+ if(!ahead||!same){L(`Alert from ${e.name} ignored (${!ahead?'not ahead':'different direction'}, ${e.dist|0} m)`);return}
+ const vs=e.speed/3.6,vr=me.speed/3.6,aS=Math.max(e.decel,4),margin=e.dist+vs*vs/(2*aS)-(vr+vr*vr/12),ttc=vr>vs?e.dist/(vr-vs):Infinity;
+ const lvl=margin<0?'CRITICAL – BRAKE NOW':margin<20?'WARNING – slow down':'CAUTION';
+ $('ov').style.background=margin<0?'#b91c1c':margin<20?'#c2410c':'#a16207';$('ov').style.display='block';
+ $('ovt').innerHTML=`${lvl}<br>${e.name} is ${e.dist|0} m ahead, decel ${e.decel.toFixed(1)} m/s²<br>Closing TTC: ${isFinite(ttc)?ttc.toFixed(1)+' s':'n/a'} · safety margin ${margin.toFixed(0)} m`;
+ L(`⚠ ${lvl} – ${e.dist|0} m ahead`);navigator.vibrate&&navigator.vibrate([300,100,300]);
+ try{const c=new AudioContext(),o=c.createOscillator();o.connect(c.destination);o.frequency.value=880;o.start();o.stop(c.currentTime+.6)}catch(x){}}
+function draw(){const c=$('cv').getContext('2d');c.clearRect(0,0,300,300);c.strokeStyle='#1e3a5f';[50,100,150].forEach(r=>{c.beginPath();c.arc(150,150,r,0,7);c.stroke()});
+ const sc=150/200,hd=me.heading*Math.PI/180;
+ peers.forEach(p=>{const dx=(p.lon-me.lon)*111320*Math.cos(me.lat*Math.PI/180),dy=(p.lat-me.lat)*111320,
+  x=dx*Math.cos(hd)-dy*Math.sin(hd),y=dx*Math.sin(hd)+dy*Math.cos(hd),self=Math.abs(dx)+Math.abs(dy)<1&&p.name===name;
+  c.fillStyle=Date.now()-(p.ts||0)<5000?'#ef4444':self?'#3b82f6':'#22c55e';c.beginPath();c.arc(150+x*sc,150-y*sc,7,0,7);c.fill();c.fillStyle='#cbd5e1';c.fillText(p.name,157+x*sc,150-y*sc)})}
+</script></body></html>
