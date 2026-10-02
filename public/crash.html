@@ -3,13 +3,13 @@
 body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:14px;max-width:480px;margin:auto}
 .card{background:#1e293b;border-radius:12px;padding:12px;margin:10px 0}button,select{padding:12px;border-radius:10px;border:0;background:#334155;color:#fff;font-size:15px;margin:3px}
 .p{background:#2563eb}.r{background:#dc2626}.big{font-size:44px;font-weight:700}small{color:#94a3b8}#log{font:12px monospace;max-height:150px;overflow:auto}
-#ov{display:none;position:fixed;inset:0;z-index:9;text-align:center;padding:12vh 16px 0;animation:fl .5s infinite alternate;font-size:20px}
+#ov{overflow-y:auto;display:none;position:fixed;inset:0;z-index:9;text-align:center;padding:12vh 16px 0;animation:fl .5s infinite alternate;font-size:20px}
 @keyframes fl{from{background:#7f1d1d}to{background:#ef4444}}#ov h1{font-size:40px;margin:10px}</style></head><body>
 <h2>🚨 CrashAlert – automatic accident detection</h2>
 <div class="card"><button class="p" id="st" onclick="start()">▶ Start protection</button>
 <select id="mode"><option value="25">Demo sensitivity (hard shake/drop)</option><option value="40">Real vehicle (≈4 g impact)</option></select>
 <div><small>Status: </small><b id="state">stopped</b></div></div>
-<div class="card"><small>Live force</small><div class="big"><span id="g">0.0</span> g</div><small>peak <span id="pk">0.0</span> g · rotation <span id="rot">0</span>°/s · GPS <span id="gps">–</span></small></div>
+<div class="card"><small>Live force</small><div class="big"><span id="g">0.0</span> g</div><small>peak <span id="pk">0.0</span> g · rotation <span id="rot">0</span>°/s · GPS <span id="gps">–</span> · devices online <span id="pc">0</span></small></div>
 <div class="card"><button class="r" onclick="countdown('manual test')">Simulate crash</button> <button onclick="ping()">Test siren on this phone</button></div>
 <div class="card"><b>Log</b><div id="log"></div></div>
 <div id="cd" style="display:none;position:fixed;inset:0;background:#92400e;z-index:8;text-align:center;padding-top:15vh"><h1>Crash detected</h1><div class="big" id="n">10</div>
@@ -23,9 +23,9 @@ async function start(){
  ctx=new (window.AudioContext||window.webkitAudioContext)();ctx.resume();
  if(navigator.wakeLock)navigator.wakeLock.request('screen').catch(()=>L('wake lock unavailable'));
  if(window.DeviceMotionEvent&&DeviceMotionEvent.requestPermission){const r=await DeviceMotionEvent.requestPermission();if(r!=='granted'){L('Motion permission denied');return}}
- navigator.geolocation.watchPosition(p=>{me.lat=p.coords.latitude;me.lon=p.coords.longitude;me.speed=(p.coords.speed||0)*3.6;me.heading=p.coords.heading;$('gps').textContent=`${me.speed.toFixed(0)} km/h`},
+ navigator.geolocation.watchPosition(p=>{me.lat=p.coords.latitude;me.lon=p.coords.longitude;me.speed=(p.coords.speed||0)*3.6;me.heading=p.coords.heading;me.acc=p.coords.accuracy;$('gps').textContent=`${me.speed.toFixed(0)} km/h`},
   e=>L('GPS error: '+e.message),{enableHighAccuracy:true,maximumAge:0});
- sock=io();sock.on('crash',onCrash);sock.on('cleared',()=>{if($('ov').style.display=='block'){stopAlert();L('Victim reported OK – alert cleared')}});
+ sock=io();sock.on('connect',()=>L('server connected'));sock.on('disconnect',()=>L('server disconnected'));sock.on('peers',p=>$('pc').textContent=p.length);sock.on('crash',onCrash);sock.on('cleared',()=>{if($('ov').style.display=='block'){stopAlert();L('Victim reported OK – alert cleared')}});
  setInterval(()=>sock.emit('telemetry',{...me,name}),2000);
  addEventListener('devicemotion',onMotion);setTimeout(()=>{armed=true;$('state').textContent='ARMED – monitoring';L('armed as '+name)},2000);
  $('state').textContent='warming up…';$('st').disabled=true}
@@ -38,11 +38,19 @@ function countdown(why){if(cdT)return;L('🔴 crash trigger: '+why);let n=10;$('
 function cancelCd(){clearInterval(cdT);cdT=null;$('cd').style.display='none';L('Cancelled by user – false alarm')}
 function declare(){if(!sock)return;sent=true;sock.emit('crash',{...me,name,g:pk||25,ts:Date.now()});$('state').innerHTML='🚨 EMERGENCY DECLARED <button onclick="imOk()">I\'m OK – clear</button>';L('🚨 Emergency declared & broadcast')}
 function imOk(){sock.emit('clear');sent=false;pk=0;$('state').textContent='ARMED – monitoring';L('Marked safe')}
+const cmp=b=>['N','NE','E','SE','S','SW','W','NW'][Math.round(b/45)%8];
 const brg=(a,b)=>{const r=Math.PI/180,dl=(b.lon-a.lon)*r,y=Math.sin(dl)*Math.cos(b.lat*r),x=Math.cos(a.lat*r)*Math.sin(b.lat*r)-Math.sin(a.lat*r)*Math.cos(b.lat*r)*Math.cos(dl);return(Math.atan2(y,x)/r+360)%360};
 function onCrash(e){let dir='nearby',lvl='CAUTION';
  if(me.heading!=null&&me.speed>2){const rel=(brg(me,e)-me.heading+360)%360;dir=rel<45||rel>315?'AHEAD':rel<135?'to your RIGHT':rel<225?'BEHIND you':'to your LEFT';if(dir==='AHEAD')lvl='DANGER – SLOW DOWN'}
- $('ot').innerHTML=`<b>${lvl}</b><br>Accident reported <b>${e.dist|0} m ${dir}</b><br>Impact ${(e.g/9.8).toFixed(1)} g · ${e.name}`;
- $('ov').style.display='block';L(`⚠ Accident ${e.dist|0} m ${dir}`);
+ $('ot').innerHTML=`<b>${lvl}</b><br>Accident reported <b>${e.dist==null?'(distance unknown)':(e.dist|0)+' m'} ${dir}</b><br>Impact ${(e.g/9.8).toFixed(1)} g · ${e.name}`;
+ let loc='';const has=e.lat||e.lon;
+ if(has){const b=(me.lat||me.lon)?` · <b>${cmp(brg(me,e))}</b> of you`:'',la=e.lat,lo=e.lon;
+  loc=`<br>📍 ${la.toFixed(5)}, ${lo.toFixed(5)}${e.acc?` (±${e.acc|0} m)`:''}${b}<br><small id="addr">locating address…</small><br>
+  <iframe style="width:100%;height:200px;border:0;border-radius:10px;margin:8px 0" src="https://www.openstreetmap.org/export/embed.html?bbox=${lo-.003},${la-.002},${lo+.003},${la+.002}&layer=mapnik&marker=${la},${lo}"></iframe><br>
+  <a href="https://www.google.com/maps/dir/?api=1&destination=${la},${lo}" target="_blank"><button class="p">Navigate to accident</button></a>`;
+  fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${la}&lon=${lo}`).then(r=>r.json()).then(j=>{const a=$('addr');if(a)a.textContent=j.display_name||''}).catch(()=>{})}
+ $('ot').innerHTML+=loc;
+ $('ov').style.display='block';L(`⚠ Accident ${e.dist==null?'?':e.dist|0} m ${dir}`);
  let hi=false;clearInterval(sirenT);sirenT=setInterval(()=>{beep(hi?600:950,.38);hi=!hi},400);
  clearInterval(vibT);vibT=setInterval(()=>navigator.vibrate&&navigator.vibrate(400),700)}
 function stopAlert(){$('ov').style.display='none';clearInterval(sirenT);clearInterval(vibT);navigator.vibrate&&navigator.vibrate(0)}
