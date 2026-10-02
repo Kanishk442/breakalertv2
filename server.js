@@ -1,5 +1,6 @@
 const express=require('express'),http=require('http'),{Server}=require('socket.io');
 const app=express(),srv=http.createServer(app),io=new Server(srv);
+app.get('/', (q, r) => r.sendFile(__dirname + '/public/crash.html'));
 app.use(express.static('public'));
 const peers={},events=[],R=+process.env.RADIUS||500; // geofence radius (m)
 const hav=(a,b)=>{const r=Math.PI/180,x=Math.sin((b.lat-a.lat)*r/2)**2+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin((b.lon-a.lon)*r/2)**2;return 12742000*Math.asin(Math.sqrt(x))};
